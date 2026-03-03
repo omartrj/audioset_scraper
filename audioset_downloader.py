@@ -16,7 +16,7 @@ from pathlib import Path
 TARGET_CATEGORIES = ["Human voice", "Human group actions", "Traffic noise, roadway noise"]
 
 # Categories to avoid: drop anything containing these sounds (or their children)
-AVOID_CATEGORIES = ["Emergency vehicle", "Music", "Speech synthesizer", "Babbling", "Narrative, monologue"]
+AVOID_CATEGORIES = ["Emergency vehicle", "Music", "Speech synthesizer", "Babbling", "Narration, monologue"]
 
 # Host operating system: "windows" or "linux"
 HOST_OS = "linux"
@@ -236,6 +236,7 @@ def download_audio(segment, output_dir, id_to_item, metadata_path, target_os):
         "-x",  # Equivalent to --extract-audio
         "--audio-format", "wav",
         "--audio-quality", "0",
+        "--no-warnings",
         "--download-sections", f"*{start_sec}-{end_sec}",
         "--force-keyframes-at-cuts",
         "--postprocessor-args", f"ffmpeg:-ar {SAMPLE_RATE} -ac {CHANNELS}",
