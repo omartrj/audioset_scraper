@@ -1,3 +1,5 @@
 .venv/
 ontology.json
 unbalanced_train_segments.csv
+downloaded_audio/
+metadata.csv
