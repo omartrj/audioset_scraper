@@ -196,7 +196,7 @@ def append_to_metadata(metadata_path, new_entry):
     file_exists = metadata_path.exists()
     
     with open(metadata_path, 'a', newline='', encoding='utf-8') as f:
-        fieldnames = ['filename', 'labels_ids', 'labels_names', 'path']
+        fieldnames = ['filename', 'labels_ids', 'labels_names']
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         
         if not file_exists:
@@ -267,8 +267,7 @@ def download_audio(segment, output_dir, id_to_item, metadata_path, target_os):
         metadata_entry = {
             'filename': wav_filename,
             'labels_ids': ";".join(segment['labels_ids']),
-            'labels_names': ";".join(labels_names),
-            'path': str(output_path.absolute())
+            'labels_names': ";".join(labels_names)
         }
         
         append_to_metadata(metadata_path, metadata_entry)
