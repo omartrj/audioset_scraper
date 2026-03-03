@@ -13,16 +13,16 @@ from pathlib import Path
 # ==============================================================================
 
 # Target categories: an array of strings (names or IDs)
-TARGET_CATEGORIES = ["Human voice", "Human group actions", "Traffic noise, roadway noise"]
+TARGET_CATEGORIES = ["Traffic noise, roadway noise"]
 
 # Categories to avoid: drop anything containing these sounds (or their children)
-AVOID_CATEGORIES = ["Emergency vehicle", "Music", "Speech synthesizer", "Babbling", "Narration, monologue"]
+AVOID_CATEGORIES = ["Narration, monologue", "Speech synthesizer", "Music", "Siren", "Emergency vehicle"]
 
 # Host operating system: "windows" or "linux"
 HOST_OS = "linux"
 
-# Hard cap per root category to ensure the dataset stays balanced
-MAX_SAMPLES_PER_CATEGORY = 1000
+# Total number of samples to download
+MAX_SAMPLES = 10
 
 # Path where your audio will be saved
 OUTPUT_DIR = "downloaded_audio"
@@ -31,7 +31,7 @@ OUTPUT_DIR = "downloaded_audio"
 SAMPLE_RATE = 48000
 CHANNELS = 1              # 1 = Mono
 MIN_DURATION = 8          # Drop segments shorter than this
-MAX_DURATION = 10         # Cap maximum length in seconds
+MAX_DURATION = 10         # Cap maximum length in seconds, set as a very high number (e.g., 1000) if you want to keep full segments regardless of length
 
 # Browser & Download Settings
 USE_COOKIES = False       # Enable this if you hit bot limits or age restrictions (requires a browser)
@@ -84,42 +84,32 @@ def get_target_mappings(ontology_path, target_categories):
 
     return target_map, id_to_item
 
-def get_existing_counts(metadata_path, target_map):
+def get_existing_downloads(metadata_path):
     """
-    Reads metadata.csv (if it exists) to count how many downloads we've already
-    secured per category. This lets us easily resume interrupted runs.
+    Reads metadata.csv (if it exists) and returns a set of already-downloaded
+    filenames (without extension) so we can skip them on resume.
     """
-    root_counts = {r: 0 for r in target_map.keys()}
     if not metadata_path.exists():
-        return root_counts
+        return set()
         
     try:
         with open(metadata_path, 'r', encoding='utf-8') as f:
             reader = csv.DictReader(f)
-            for row in reader:
-                labels = set(row.get('labels_ids', '').split(';'))
-                for root, children in target_map.items():
-                    if children.intersection(labels):
-                        root_counts[root] += 1
+            # filename is stored as "ytid_start.wav", strip the extension for key matching
+            return {Path(row['filename']).stem for row in reader}
     except Exception as e:
-        logging.error(f"Failed reading metadata.csv for counts: {e}")
-        
-    return root_counts
+        logging.error(f"Failed reading metadata.csv: {e}")
+        return set()
 
 def parse_csv_for_targets(csv_path, target_map, avoid_map, max_samples, min_duration, metadata_path):
     """
-    Scans the CSV, drops short clips, drops clips with unwanted labels, 
-    and returns candidates respecting the max_samples limit.
+    Scans the CSV, drops short clips, drops clips with unwanted labels,
+    and returns up to max_samples candidates (minus those already downloaded).
     """
     if not Path(csv_path).exists():
         logging.error(f"CSV file not found: {csv_path}")
         return []
 
-    # Flatten valid IDs for fast lookup
-    all_valid_ids = set()
-    for children in target_map.values():
-        all_valid_ids.update(children)
-        
     # Flatten avoid IDs
     all_avoid_ids = set()
     if avoid_map:
@@ -146,10 +136,11 @@ def parse_csv_for_targets(csv_path, target_map, avoid_map, max_samples, min_dura
                 
                 labels_str = ",".join(row[3:]).replace('"', '').strip()
                 labels_list = [l.strip() for l in labels_str.split(',')]
+                labels_set = set(labels_list)
                 
-                # Fast set logic: must have a target, but must NOT have an avoided label
-                if all_valid_ids.intersection(labels_list):
-                    if not all_avoid_ids.intersection(labels_list):
+                # AND logic: the clip must contain at least one label from EVERY target category
+                if all(children.intersection(labels_set) for children in target_map.values()):
+                    if not all_avoid_ids.intersection(labels_set):
                         all_candidates.append({
                             'ytid': ytid,
                             'start_seconds': start_sec,
@@ -160,34 +151,24 @@ def parse_csv_for_targets(csv_path, target_map, avoid_map, max_samples, min_dura
         logging.error(f"Error parsing the CSV: {e}")
         return []
 
-    # Shuffle to ensure we get a varied mix up to max_samples
+    # Shuffle to ensure we get a varied mix
     random.shuffle(all_candidates)
 
-    matched_segments = []
-    
-    # Initialize counts based on what's already on disk
-    root_counts = get_existing_counts(metadata_path, target_map)
-    logging.info(f"Existing counts from metadata: {root_counts}")
+    # Filter out segments already downloaded (prevents duplicates on resume)
+    already_downloaded = get_existing_downloads(metadata_path)
+    logging.info(f"Already downloaded: {len(already_downloaded)} samples")
+    all_candidates = [
+        s for s in all_candidates
+        if f"{s['ytid']}_{s['start_seconds']}" not in already_downloaded
+    ]
 
-    for segment in all_candidates:
-        labels = segment['labels_ids']
-        added = False
-        
-        for root, children in target_map.items():
-            if children.intersection(labels):
-                if root_counts[root] < max_samples:
-                    root_counts[root] += 1
-                    added = True
-                    
-        if added:
-            matched_segments.append(segment)
-            
-        # Stop collecting candidates early if all categories hit their cap
-        if all(count >= max_samples for count in root_counts.values()):
-            logging.info("Candidate setup reached the MAX_SAMPLES_PER_CATEGORY limit.")
-            break
+    remaining = max_samples - len(already_downloaded)
+    if remaining <= 0:
+        logging.info("MAX_SAMPLES already reached. Nothing to download.")
+        return []
 
-    return matched_segments
+    # Return ALL valid candidates so failures don't reduce the final count
+    return all_candidates
 
 def append_to_metadata(metadata_path, new_entry):
     """
@@ -316,13 +297,18 @@ def main():
         logging.info(f"Found {len(avoid_map)} blacklisted root categories, tracking {sum(len(v) for v in avoid_map.values())} specific tags to dodge.")
     
     logging.info("Parsing Unbalanced Train Dataset...")
-    segments_to_process = parse_csv_for_targets(CSV_PATH, target_map, avoid_map, MAX_SAMPLES_PER_CATEGORY, MIN_DURATION, metadata_path)
+    segments_to_process = parse_csv_for_targets(CSV_PATH, target_map, avoid_map, MAX_SAMPLES, MIN_DURATION, metadata_path)
+    already_done = len(get_existing_downloads(metadata_path))
     
-    logging.info(f"Ready to process. Filtered candidates needed to top-up the batch: {len(segments_to_process)}")
+    logging.info(f"Ready to process. Filtered candidates available: {len(segments_to_process)}")
     
     downloaded_count = 0
 
     for segment in segments_to_process:
+        total_so_far = already_done + downloaded_count
+        if total_so_far >= MAX_SAMPLES:
+            logging.info(f"--> Reached MAX_SAMPLES [{MAX_SAMPLES}]. Done.")
+            break
         if downloaded_count >= BATCH_SIZE:
             logging.info(f"--> Reached batch limit [{BATCH_SIZE}]. Taking a break (re-run to grab more).")
             break
@@ -332,7 +318,7 @@ def main():
         if is_success:
             downloaded_count += 1
             delay = random.uniform(SLEEP_INTERVAL[0], SLEEP_INTERVAL[1])
-            logging.info(f"    --> Download complete ({downloaded_count}/{BATCH_SIZE}). Cooldown: {delay:.2f}s")
+            logging.info(f"    --> Download complete ({already_done + downloaded_count}/{MAX_SAMPLES}). Cooldown: {delay:.2f}s")
             time.sleep(delay)
 
     logging.info(f"All done! Successfully grabbed {downloaded_count} new samples this session.")
