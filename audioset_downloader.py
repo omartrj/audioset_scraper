@@ -13,10 +13,11 @@ from pathlib import Path
 # ==============================================================================
 
 # Categorie target: definisci un array di stringhe (id o nomi)
-TARGET_CATEGORIES = ["Human voice", "Human group actions", "Motor vehicle (road)"]
+#TARGET_CATEGORIES = ["Human voice", "Human group actions", "Motor vehicle (road)"]
+TARGET_CATEGORIES = ["Human voice", "Human group actions", "Traffic noise, roadway noise"]
 
 # Categorie da EVITARE: scarta video che contengono questi suoni (o i loro figli)
-AVOID_CATEGORIES = ["Emergency vehicle"]
+AVOID_CATEGORIES = ["Emergency vehicle", "Music"]
 
 # Sistema operativo dell'host: "windows" o "linux"
 HOST_OS = "linux"  # <--- CAMBIA QUESTO VALORE SE NECESSARIO
@@ -30,12 +31,13 @@ OUTPUT_DIR = "downloaded_audio"
 # Audio Settings
 SAMPLE_RATE = 48000
 CHANNELS = 1              # 1 = Mono
-MAX_DURATION = 10         # Durata massima in secondi
+MIN_DURATION = 8          # Durata minima in secondi (scarta i più corti)
+MAX_DURATION = 10         # Durata massima in secondi (se più lungo, taglia a 10s)
 
 # Browser & download Settings
 USE_COOKIES = False       # Setta a True in caso di problemi di restrizione età/bot (richiede browser cookies)
 BROWSER = "chrome"        # Scegli uno tra: chrome, firefox, edge, safari, opera, brave
-SLEEP_INTERVAL = [2, 5]   # Min e Max delay tra un download e l'altro in secondi
+SLEEP_INTERVAL = [1, 3]   # Min e Max delay tra un download e l'altro in secondi
 BATCH_SIZE = 5           # <- Abbassato a 5 per test rapido
 
 # Percorsi ai meta-dati necessari di AudioSet
@@ -83,11 +85,12 @@ def get_target_mappings(ontology_path, target_categories):
 
     return target_map, id_to_item
 
-def parse_csv_for_targets(csv_path, target_map, avoid_map, max_samples):
+def parse_csv_for_targets(csv_path, target_map, avoid_map, max_samples, min_duration):
     """
     Scansiona il file CSV, identifica i video pertinenti e ritorna una lista 
     che rispetta `max_samples` massimo per ogni categoria (root).
-    Scarta tutti i video che possiedono tag presenti in `avoid_map`.
+    Scarta tutti i video che possiedono tag presenti in `avoid_map`
+    e i cui segmenti durano meno di `min_duration`.
     """
     if not Path(csv_path).exists():
         logging.error(f"File CSV non trovato: {csv_path}")
@@ -119,6 +122,10 @@ def parse_csv_for_targets(csv_path, target_map, avoid_map, max_samples):
                 ytid = row[0]
                 start_sec = float(row[1])
                 end_sec = float(row[2])
+                
+                # Se il segmento dura meno del minimo, scarta subito
+                if (end_sec - start_sec) < min_duration:
+                    continue
                 
                 # Uniamo tutto ciò che ricade da row[3] in avanti (visto che audioset raggruppa multipli labels splitagati per virgola)
                 labels_str = ",".join(row[3:]).replace('"', '').strip()
@@ -282,7 +289,7 @@ def main():
     # Usando pathlib per path indipendenti dalle sbarre OS-specifiche (Windows / linux)
     output_dir = Path(OUTPUT_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
-    metadata_path = output_dir / "metadata.csv"
+    metadata_path = Path("metadata.csv")
     
     logging.info(f"Target di salvataggio directory: {output_dir.absolute()}")
     logging.info("Caricamento configurazioni categorie da Ontology...")
@@ -301,7 +308,7 @@ def main():
         logging.info(f"Trovate {len(avoid_map)} categorie Root DA SCARTARE, corrispondenti a {sum(len(v) for v in avoid_map.values())} tag specifici.")
     
     logging.info("Parsando Unbalanced Train Dataset...")
-    segments_to_process = parse_csv_for_targets(CSV_PATH, target_map, avoid_map, MAX_SAMPLES_PER_CATEGORY)
+    segments_to_process = parse_csv_for_targets(CSV_PATH, target_map, avoid_map, MAX_SAMPLES_PER_CATEGORY, MIN_DURATION)
     
     logging.info(f"Pronto per l'elaborazione. Candidati pre-selezionati per coprire limite batch: {len(segments_to_process)}")
     
