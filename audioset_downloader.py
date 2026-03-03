@@ -85,7 +85,30 @@ def get_target_mappings(ontology_path, target_categories):
 
     return target_map, id_to_item
 
-def parse_csv_for_targets(csv_path, target_map, avoid_map, max_samples, min_duration):
+def get_existing_counts(metadata_path, target_map):
+    """
+    Legge il file metadata.csv (se esiste) e conta quanti file sono già stati
+    scaricati per ciascuna 'root category'. Questo permette di riprendere
+    da dove ci si è fermati in esecuzioni precedenti.
+    """
+    root_counts = {r: 0 for r in target_map.keys()}
+    if not metadata_path.exists():
+        return root_counts
+        
+    try:
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                labels = set(row.get('labels_ids', '').split(';'))
+                for root, children in target_map.items():
+                    if children.intersection(labels):
+                        root_counts[root] += 1
+    except Exception as e:
+        logging.error(f"Errore durante la lettura del metadata.csv per il conteggio: {e}")
+        
+    return root_counts
+
+def parse_csv_for_targets(csv_path, target_map, avoid_map, max_samples, min_duration, metadata_path):
     """
     Scansiona il file CSV, identifica i video pertinenti e ritorna una lista 
     che rispetta `max_samples` massimo per ogni categoria (root).
@@ -148,7 +171,10 @@ def parse_csv_for_targets(csv_path, target_map, avoid_map, max_samples, min_dura
     random.shuffle(all_candidates)
 
     matched_segments = []
-    root_counts = {r: 0 for r in target_map.keys()}
+    
+    # Inizializza i conteggi leggendo quelli già precedentemente scaricati 
+    root_counts = get_existing_counts(metadata_path, target_map)
+    logging.info(f"Conteggio file pre-esistenti in metadata per limite massimo: {root_counts}")
 
     for segment in all_candidates:
         labels = segment['labels_ids']
@@ -308,7 +334,7 @@ def main():
         logging.info(f"Trovate {len(avoid_map)} categorie Root DA SCARTARE, corrispondenti a {sum(len(v) for v in avoid_map.values())} tag specifici.")
     
     logging.info("Parsando Unbalanced Train Dataset...")
-    segments_to_process = parse_csv_for_targets(CSV_PATH, target_map, avoid_map, MAX_SAMPLES_PER_CATEGORY, MIN_DURATION)
+    segments_to_process = parse_csv_for_targets(CSV_PATH, target_map, avoid_map, MAX_SAMPLES_PER_CATEGORY, MIN_DURATION, metadata_path)
     
     logging.info(f"Pronto per l'elaborazione. Candidati pre-selezionati per coprire limite batch: {len(segments_to_process)}")
     
