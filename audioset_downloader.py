@@ -9,60 +9,59 @@ import os
 from pathlib import Path
 
 # ==============================================================================
-# CONFIGURAZIONE INIZIALE
+# INITIAL SETUP
 # ==============================================================================
 
-# Categorie target: definisci un array di stringhe (id o nomi)
-#TARGET_CATEGORIES = ["Human voice", "Human group actions", "Motor vehicle (road)"]
+# Target categories: an array of strings (names or IDs)
 TARGET_CATEGORIES = ["Human voice", "Human group actions", "Traffic noise, roadway noise"]
 
-# Categorie da EVITARE: scarta video che contengono questi suoni (o i loro figli)
-AVOID_CATEGORIES = ["Emergency vehicle", "Music"]
+# Categories to avoid: drop anything containing these sounds (or their children)
+AVOID_CATEGORIES = ["Emergency vehicle", "Music", "Speech synthesizer", "Babbling", "Narrative, monologue"]
 
-# Sistema operativo dell'host: "windows" o "linux"
-HOST_OS = "linux"  # <--- CAMBIA QUESTO VALORE SE NECESSARIO
+# Host operating system: "windows" or "linux"
+HOST_OS = "linux"
 
-# Limite intero per evitare che una classe domini il dataset (es: max 100 sample per root category)
-MAX_SAMPLES_PER_CATEGORY = 2  # <- Abbassato a 2 per test rapido
+# Hard cap per root category to ensure the dataset stays balanced
+MAX_SAMPLES_PER_CATEGORY = 1000
 
-# Directory di destinazione unica 
+# Path where your audio will be saved
 OUTPUT_DIR = "downloaded_audio"
 
 # Audio Settings
 SAMPLE_RATE = 48000
 CHANNELS = 1              # 1 = Mono
-MIN_DURATION = 8          # Durata minima in secondi (scarta i più corti)
-MAX_DURATION = 10         # Durata massima in secondi (se più lungo, taglia a 10s)
+MIN_DURATION = 8          # Drop segments shorter than this
+MAX_DURATION = 10         # Cap maximum length in seconds
 
-# Browser & download Settings
-USE_COOKIES = False       # Setta a True in caso di problemi di restrizione età/bot (richiede browser cookies)
-BROWSER = "chrome"        # Scegli uno tra: chrome, firefox, edge, safari, opera, brave
-SLEEP_INTERVAL = [1, 3]   # Min e Max delay tra un download e l'altro in secondi
-BATCH_SIZE = 5           # <- Abbassato a 5 per test rapido
+# Browser & Download Settings
+USE_COOKIES = False       # Enable this if you hit bot limits or age restrictions (requires a browser)
+BROWSER = "firefox"       # Options: chrome, firefox, edge, safari, opera, brave
+SLEEP_INTERVAL = [1, 3]   # Random pause between downloads (helps fly under the radar)
+BATCH_SIZE = 500          # Max downloads per run (useful for chunking)
 
-# Percorsi ai meta-dati necessari di AudioSet
+# Paths to AudioSet metadata
 ONTOLOGY_PATH = "ontology.json"
 CSV_PATH = "unbalanced_train_segments.csv"
 
 # ==============================================================================
-# CONFIGURAZIONE LOGGING
+# LOGGING CONFIG
 # ==============================================================================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # ==============================================================================
-# FUNZIONI PRINCIPALI
+# CORE FUNCTIONS
 # ==============================================================================
 
 def get_target_mappings(ontology_path, target_categories):
     """
-    Risolve ricorsivamente i child_ids delle categorie in `target_categories`.
-    Ritorna un dizionario `{root_id: set_di_sub_ids_inclusa_root}` per bilanciare correttamente il dataset.
+    Recursively fetch child IDs for the specified target categories.
+    Returns a dict {root_id: set_of_all_sub_ids} used to balance the dataset.
     """
     try:
         with open(ontology_path, 'r', encoding='utf-8') as f:
             ontology = json.load(f)
     except FileNotFoundError:
-        logging.error(f"File {ontology_path} non trovato.")
+        logging.error(f"File {ontology_path} not found.")
         return {}, {}
 
     name_to_id = {item['name']: item['id'] for item in ontology}
@@ -81,15 +80,14 @@ def get_target_mappings(ontology_path, target_categories):
         if cat_id in id_to_item:
             target_map[cat_id] = get_all_children(cat_id)
         else:
-            logging.warning(f"Categoria ignorata (non trovata nell'ontologia): {cat}")
+            logging.warning(f"Skipping category (not found in ontology): {cat}")
 
     return target_map, id_to_item
 
 def get_existing_counts(metadata_path, target_map):
     """
-    Legge il file metadata.csv (se esiste) e conta quanti file sono già stati
-    scaricati per ciascuna 'root category'. Questo permette di riprendere
-    da dove ci si è fermati in esecuzioni precedenti.
+    Reads metadata.csv (if it exists) to count how many downloads we've already
+    secured per category. This lets us easily resume interrupted runs.
     """
     root_counts = {r: 0 for r in target_map.keys()}
     if not metadata_path.exists():
@@ -104,27 +102,25 @@ def get_existing_counts(metadata_path, target_map):
                     if children.intersection(labels):
                         root_counts[root] += 1
     except Exception as e:
-        logging.error(f"Errore durante la lettura del metadata.csv per il conteggio: {e}")
+        logging.error(f"Failed reading metadata.csv for counts: {e}")
         
     return root_counts
 
 def parse_csv_for_targets(csv_path, target_map, avoid_map, max_samples, min_duration, metadata_path):
     """
-    Scansiona il file CSV, identifica i video pertinenti e ritorna una lista 
-    che rispetta `max_samples` massimo per ogni categoria (root).
-    Scarta tutti i video che possiedono tag presenti in `avoid_map`
-    e i cui segmenti durano meno di `min_duration`.
+    Scans the CSV, drops short clips, drops clips with unwanted labels, 
+    and returns candidates respecting the max_samples limit.
     """
     if not Path(csv_path).exists():
-        logging.error(f"File CSV non trovato: {csv_path}")
+        logging.error(f"CSV file not found: {csv_path}")
         return []
 
-    # Flatten di tutti gli id validi per check rapido
+    # Flatten valid IDs for fast lookup
     all_valid_ids = set()
     for children in target_map.values():
         all_valid_ids.update(children)
         
-    # Flatten degli id da evitare
+    # Flatten avoid IDs
     all_avoid_ids = set()
     if avoid_map:
         for children in avoid_map.values():
@@ -134,29 +130,26 @@ def parse_csv_for_targets(csv_path, target_map, avoid_map, max_samples, min_dura
     
     try:
         with open(csv_path, 'r', encoding='utf-8') as f:
-            # skipinitialspace per ignorare gli spazi dopo ogni singola virgola
             reader = csv.reader(f, skipinitialspace=True)
             for row in reader:
-                # Ignora le righe di commento o vuote
+                # Skip comments and empty lines
                 if not row or row[0].startswith('#'):
                     continue
                 
-                # I metadata di audioset CSV si presentano così: yt_id, start_seconds, end_seconds, labels...
                 ytid = row[0]
                 start_sec = float(row[1])
                 end_sec = float(row[2])
                 
-                # Se il segmento dura meno del minimo, scarta subito
+                # Drop segments that are too short
                 if (end_sec - start_sec) < min_duration:
                     continue
                 
-                # Uniamo tutto ciò che ricade da row[3] in avanti (visto che audioset raggruppa multipli labels splitagati per virgola)
                 labels_str = ",".join(row[3:]).replace('"', '').strip()
                 labels_list = [l.strip() for l in labels_str.split(',')]
                 
-                # Controllo super rapido con i valid_ids e avoid_ids
+                # Fast set logic: must have a target, but must NOT have an avoided label
                 if all_valid_ids.intersection(labels_list):
-                    if not all_avoid_ids.intersection(labels_list):  # Se NON contiene etichette da scartare
+                    if not all_avoid_ids.intersection(labels_list):
                         all_candidates.append({
                             'ytid': ytid,
                             'start_seconds': start_sec,
@@ -164,23 +157,22 @@ def parse_csv_for_targets(csv_path, target_map, avoid_map, max_samples, min_dura
                             'labels_ids': labels_list
                         })
     except Exception as e:
-        logging.error(f"Errore durante la lettura del CSV: {e}")
+        logging.error(f"Error parsing the CSV: {e}")
         return []
 
-    # Mescoliamo i campioni per dare varietà (poiché limiteremo via "max_samples"!)
+    # Shuffle to ensure we get a varied mix up to max_samples
     random.shuffle(all_candidates)
 
     matched_segments = []
     
-    # Inizializza i conteggi leggendo quelli già precedentemente scaricati 
+    # Initialize counts based on what's already on disk
     root_counts = get_existing_counts(metadata_path, target_map)
-    logging.info(f"Conteggio file pre-esistenti in metadata per limite massimo: {root_counts}")
+    logging.info(f"Existing counts from metadata: {root_counts}")
 
     for segment in all_candidates:
         labels = segment['labels_ids']
         added = False
         
-        # Ci assicuriamo di non sforare il limite per l'assegnazione
         for root, children in target_map.items():
             if children.intersection(labels):
                 if root_counts[root] < max_samples:
@@ -190,16 +182,16 @@ def parse_csv_for_targets(csv_path, target_map, avoid_map, max_samples, min_dura
         if added:
             matched_segments.append(segment)
             
-        # Break condizionale se tutti i root id hanno soddisfatto la capienza
+        # Stop collecting candidates early if all categories hit their cap
         if all(count >= max_samples for count in root_counts.values()):
-            logging.info("Raggiunto il MAX_SAMPLES_PER_CATEGORY per la fase di setup candidati.")
+            logging.info("Candidate setup reached the MAX_SAMPLES_PER_CATEGORY limit.")
             break
 
     return matched_segments
 
 def append_to_metadata(metadata_path, new_entry):
     """
-    Genera od aggiorna (append) il metadata.csv.
+    Appends a new entry to the metadata CSV, creating it if needed.
     """
     file_exists = metadata_path.exists()
     
@@ -214,44 +206,38 @@ def append_to_metadata(metadata_path, new_entry):
 
 def download_audio(segment, output_dir, id_to_item, metadata_path, target_os):
     """
-    Usa yt-dlp per scaricare la traccia audio filtrata e converte via ffmpeg 
-    rispettando la direttiva durata, rate e mono.
-    Ritorna True in caso di download riuscito, bloccato/fallito=False.
+    Downloads via yt-dlp and formats via ffmpeg.
+    Returns True on success, False if skipped/failed.
     """
     ytid = segment['ytid']
     start_sec = segment['start_seconds']
     
-    # Processiamo max durata:
+    # Limit duration if necessary
     end_sec = min(segment['end_seconds'], start_sec + MAX_DURATION)
     
     base_filename = f"{ytid}_{start_sec}"
     wav_filename = f"{base_filename}.wav"
     output_path = output_dir / wav_filename
     
-    # --- Check Resume ---
+    # Skip if we already downloaded this exact file
     if output_path.exists():
-        logging.info(f"[RESUME] File '{wav_filename}' già esistente. Skkippato.")
-        # Ritorniamo falso perché non lo contabilizziamo nei download della current BATCH
+        logging.info(f"[RESUME] '{wav_filename}' already exists. Skipping.")
         return False
 
     url = f"https://www.youtube.com/watch?v={ytid}"
     
-    # Template path yt-dlp non accetta l'estensione rigida se noi le passiamo flag --audio-format
-    # Per cui usiamo .%(ext)s ed avvantaggiamo il fatto che estrarrà wav puro con la postprocessor flag.
-    # Convertiamo a stringa per garantire path cross-platform in compatibilità subprocess
+    # Let yt-dlp determine the temp extension naturally, we enforce WAV via post-processor
     yt_output_template = str(output_dir / f"{base_filename}.%(ext)s")
     
     yt_dlp_bin = "yt-dlp.exe" if target_os == "windows" else "yt-dlp"
     
     cmd = [
         yt_dlp_bin,
-        "-x",  # equivale a --extract-audio
+        "-x",  # Equivalent to --extract-audio
         "--audio-format", "wav",
         "--audio-quality", "0",
-        # Taglia la sezione corretta
         "--download-sections", f"*{start_sec}-{end_sec}",
         "--force-keyframes-at-cuts",
-        # Post-processor argument for ffmpeg (Resampling/Mono/ecc)
         "--postprocessor-args", f"ffmpeg:-ar {SAMPLE_RATE} -ac {CHANNELS}",
         "-o", yt_output_template,
     ]
@@ -259,41 +245,39 @@ def download_audio(segment, output_dir, id_to_item, metadata_path, target_os):
     if USE_COOKIES:
         cmd.extend(["--cookies-from-browser", BROWSER])
         
-    # Appendiamo l'URL in fondo alla lista argomenti
     cmd.append(url)
     
     try:
         logging.info(f"Downloading [{base_filename}] | {min(end_sec - start_sec, MAX_DURATION)}s")
-        # Redirezionamento dei log di base yt-dlp e passandoli al nostro devnull (salvo errori visibili in stderr)
+        # Directing terminal output to devnull so logs stay clean
         result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         
         if result.returncode != 0:
-            logging.error(f"Errore al download del video: {ytid}. {result.stderr.strip()[:150]}") # Troncato x leggibilità
+            # Slicing the error string ensures it doesn't flood the terminal
+            logging.error(f"Download failed for video {ytid}. {result.stderr.strip()[:150]}")
             return False
             
         if not output_path.exists():
-            logging.error(f"Impossibile posizionare output, forse il video base non esiste più per ID: {ytid}")
+            logging.error(f"Couldn't locate the final output. The video {ytid} might be gone.")
             return False
             
-        # Generiamo le descrizioni dei labels lette
         labels_names = [id_to_item[lbl]['name'] for lbl in segment['labels_ids'] if lbl in id_to_item]
         
         metadata_entry = {
             'filename': wav_filename,
-            'labels_ids': ";".join(segment['labels_ids']),   # delimiti interno a punto e virgola
+            'labels_ids': ";".join(segment['labels_ids']),
             'labels_names': ";".join(labels_names),
-            'path': str(output_path.absolute()) # Compatibile robusto x Windows e Linux
+            'path': str(output_path.absolute())
         }
         
         append_to_metadata(metadata_path, metadata_entry)
         return True
         
     except FileNotFoundError:
-        logging.critical("yt-dlp o ffmpeg NON trovato nel PATH di sistema. Assicurati che siano installati correttamente!")
-        # Rilanciamo o forziamo exit visto che non è recuperabile questo state
+        logging.critical("yt-dlp or ffmpeg not found in PATH. Make sure they are installed!")
         raise
     except Exception as e:
-        logging.error(f"Riepilogo Errore su yt_id {ytid}: {str(e)}")
+        logging.error(f"Unexpected error on {ytid}: {str(e)}")
         return False
 
 # ==============================================================================
@@ -302,47 +286,45 @@ def download_audio(segment, output_dir, id_to_item, metadata_path, target_os):
 
 def main():
     if not TARGET_CATEGORIES:
-        logging.error("Nessuna categoria target presente in TARGET_CATEGORIES. Script arrestato.")
+        logging.error("No target categories provided. Stopping.")
         return
 
     target_os = HOST_OS.lower()
     if target_os not in ["windows", "linux"]:
-        logging.error("HOST_OS non valido. Scegli tra 'windows' o 'linux'.")
+        logging.error("Invalid HOST_OS. Choose either 'windows' or 'linux'.")
         return
         
-    logging.info(f"OS Target configurato (codice HOST_OS): {target_os}")
+    logging.info(f"Configured Target OS: {target_os}")
 
-    # Usando pathlib per path indipendenti dalle sbarre OS-specifiche (Windows / linux)
     output_dir = Path(OUTPUT_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = Path("metadata.csv")
     
-    logging.info(f"Target di salvataggio directory: {output_dir.absolute()}")
-    logging.info("Caricamento configurazioni categorie da Ontology...")
+    logging.info(f"Saving output to: {output_dir.absolute()}")
+    logging.info("Loading ontology map...")
     
     target_map, id_to_item = get_target_mappings(ONTOLOGY_PATH, TARGET_CATEGORIES)
     avoid_map, _ = get_target_mappings(ONTOLOGY_PATH, AVOID_CATEGORIES)
     
     if not target_map:
-        logging.warning("Finito. (Configurazione Categorie assente o non corrispondente)")
+        logging.warning("Done. (Category config is empty or mismatched)")
         return
         
-    # Count of valid resolved targets
     resolved_count_sum = sum(len(v) for v in target_map.values())
-    logging.info(f"Trovate {len(target_map)} categorie Root che matchano un totale inclusivo di {resolved_count_sum} tag specifici.")
+    logging.info(f"Found {len(target_map)} target root categories mapping to {resolved_count_sum} specific tags.")
     if avoid_map:
-        logging.info(f"Trovate {len(avoid_map)} categorie Root DA SCARTARE, corrispondenti a {sum(len(v) for v in avoid_map.values())} tag specifici.")
+        logging.info(f"Found {len(avoid_map)} blacklisted root categories, tracking {sum(len(v) for v in avoid_map.values())} specific tags to dodge.")
     
-    logging.info("Parsando Unbalanced Train Dataset...")
+    logging.info("Parsing Unbalanced Train Dataset...")
     segments_to_process = parse_csv_for_targets(CSV_PATH, target_map, avoid_map, MAX_SAMPLES_PER_CATEGORY, MIN_DURATION, metadata_path)
     
-    logging.info(f"Pronto per l'elaborazione. Candidati pre-selezionati per coprire limite batch: {len(segments_to_process)}")
+    logging.info(f"Ready to process. Filtered candidates needed to top-up the batch: {len(segments_to_process)}")
     
     downloaded_count = 0
 
     for segment in segments_to_process:
         if downloaded_count >= BATCH_SIZE:
-            logging.info(f"--> Raggiunto limite BATCH_SIZE [{BATCH_SIZE}]. Esecuzione terminata (riavvia se occorre scaricare altri segmenti).")
+            logging.info(f"--> Reached batch limit [{BATCH_SIZE}]. Taking a break (re-run to grab more).")
             break
             
         is_success = download_audio(segment, output_dir, id_to_item, metadata_path, target_os)
@@ -350,10 +332,10 @@ def main():
         if is_success:
             downloaded_count += 1
             delay = random.uniform(SLEEP_INTERVAL[0], SLEEP_INTERVAL[1])
-            logging.info(f"    --> Download effettuato ({downloaded_count}/{BATCH_SIZE}). Delay applicato: {delay:.2f}s per emulare traffico umano.")
+            logging.info(f"    --> Download complete ({downloaded_count}/{BATCH_SIZE}). Cooldown: {delay:.2f}s")
             time.sleep(delay)
 
-    logging.info(f"Lavoro concluso! Riusciti nuovi scaricamenti in questa sessione: {downloaded_count}.")
+    logging.info(f"All done! Successfully grabbed {downloaded_count} new samples this session.")
 
 if __name__ == "__main__":
     main()
