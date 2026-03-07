@@ -1,0 +1,25 @@
+{
+  "_comment": "STEP 1 — Human voice (no street noise background). Uses balanced_train_segments.csv because 'Speech' is the most common label and the balanced set avoids over-representing it.",
+  "download": {
+    "targets":      ["Speech"],
+    "avoid":        ["Narration, monologue", "Speech synthesizer", "Music", "Alarm", "Siren", "Emergency vehicle"],
+    "host":         "linux",
+    "max_samples":  5000,
+    "output_dir":   "human_voice",
+    "metadata":     "metadata.csv",
+    "batch_size":   5000,
+    "csv_path":     "unbalanced_train_segments.csv",
+    "ontology_path": "ontology.json"
+  },
+  "audio": {
+    "sample_rate":  48000,
+    "channels":     1,
+    "min_duration": 8,
+    "max_duration": 10
+  },
+  "browser": {
+    "use_cookies":    false,
+    "browser":        "firefox",
+    "sleep_interval": [1, 3]
+  }
+}

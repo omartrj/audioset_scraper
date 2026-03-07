@@ -5,43 +5,7 @@ import random
 import subprocess
 import logging
 import argparse
-import os
 from pathlib import Path
-
-# ==============================================================================
-# INITIAL SETUP
-# ==============================================================================
-
-# Target categories: an array of strings (names or IDs)
-TARGET_CATEGORIES = ["Traffic noise, roadway noise"]
-
-# Categories to avoid: drop anything containing these sounds (or their children)
-AVOID_CATEGORIES = ["Narration, monologue", "Speech synthesizer", "Music", "Siren", "Emergency vehicle"]
-
-# Host operating system: "windows" or "linux"
-HOST_OS = "linux"
-
-# Total number of samples to download
-MAX_SAMPLES = 10
-
-# Path where your audio will be saved
-OUTPUT_DIR = "downloaded_audio"
-
-# Audio Settings
-SAMPLE_RATE = 48000
-CHANNELS = 1              # 1 = Mono
-MIN_DURATION = 8          # Drop segments shorter than this
-MAX_DURATION = 10         # Cap maximum length in seconds, set as a very high number (e.g., 1000) if you want to keep full segments regardless of length
-
-# Browser & Download Settings
-USE_COOKIES = False       # Enable this if you hit bot limits or age restrictions (requires a browser)
-BROWSER = "firefox"       # Options: chrome, firefox, edge, safari, opera, brave
-SLEEP_INTERVAL = [1, 3]   # Random pause between downloads (helps fly under the radar)
-BATCH_SIZE = 500          # Max downloads per run (useful for chunking)
-
-# Paths to AudioSet metadata
-ONTOLOGY_PATH = "ontology.json"
-CSV_PATH = "unbalanced_train_segments.csv"
 
 # ==============================================================================
 # LOGGING CONFIG
@@ -185,16 +149,23 @@ def append_to_metadata(metadata_path, new_entry):
         
         writer.writerow(new_entry)
 
-def download_audio(segment, output_dir, id_to_item, metadata_path, target_os):
+def download_audio(segment, output_dir, id_to_item, metadata_path, cfg):
     """
     Downloads via yt-dlp and formats via ffmpeg.
     Returns True on success, False if skipped/failed.
     """
     ytid = segment['ytid']
     start_sec = segment['start_seconds']
+
+    max_duration = cfg["max_duration"]
+    sample_rate = cfg["sample_rate"]
+    channels = cfg["channels"]
+    use_cookies = cfg["use_cookies"]
+    browser_name = cfg["browser_name"]
+    target_os = cfg["host"]
     
     # Limit duration if necessary
-    end_sec = min(segment['end_seconds'], start_sec + MAX_DURATION)
+    end_sec = min(segment['end_seconds'], start_sec + max_duration)
     
     base_filename = f"{ytid}_{start_sec}"
     wav_filename = f"{base_filename}.wav"
@@ -220,17 +191,17 @@ def download_audio(segment, output_dir, id_to_item, metadata_path, target_os):
         "--no-warnings",
         "--download-sections", f"*{start_sec}-{end_sec}",
         "--force-keyframes-at-cuts",
-        "--postprocessor-args", f"ffmpeg:-ar {SAMPLE_RATE} -ac {CHANNELS}",
+        "--postprocessor-args", f"ffmpeg:-ar {sample_rate} -ac {channels}",
         "-o", yt_output_template,
     ]
     
-    if USE_COOKIES:
-        cmd.extend(["--cookies-from-browser", BROWSER])
+    if use_cookies:
+        cmd.extend(["--cookies-from-browser", browser_name])
         
     cmd.append(url)
     
     try:
-        logging.info(f"Downloading [{base_filename}] | {min(end_sec - start_sec, MAX_DURATION)}s")
+        logging.info(f"Downloading [{base_filename}] | {min(end_sec - start_sec, max_duration)}s")
         # Directing terminal output to devnull so logs stay clean
         result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         
@@ -246,7 +217,7 @@ def download_audio(segment, output_dir, id_to_item, metadata_path, target_os):
         labels_names = [id_to_item[lbl]['name'] for lbl in segment['labels_ids'] if lbl in id_to_item]
         
         metadata_entry = {
-            'filename': wav_filename,
+            'filename': f"audio/{wav_filename}",
             'labels_ids': ";".join(segment['labels_ids']),
             'labels_names': ";".join(labels_names)
         }
@@ -266,59 +237,102 @@ def download_audio(segment, output_dir, id_to_item, metadata_path, target_os):
 # ==============================================================================
 
 def main():
-    if not TARGET_CATEGORIES:
+    parser = argparse.ArgumentParser(description="AudioSet Downloader")
+    parser.add_argument("--config", required=True, help="Path to the JSON config file")
+    args = parser.parse_args()
+
+    config_path = Path(args.config)
+    if not config_path.exists():
+        logging.error(f"Config file not found: {config_path}")
+        return
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+
+    dl = raw.get("download", {})
+    audio_cfg = raw.get("audio", {})
+    browser_cfg = raw.get("browser", {})
+
+    cfg = {
+        # [download]
+        "targets":      dl["targets"],
+        "avoid":        dl.get("avoid", []),
+        "host":         dl.get("host", "linux").lower(),
+        "max_samples":  dl["max_samples"],
+        "output_dir":   dl["output_dir"],
+        "metadata":     dl["metadata"],
+        "batch_size":   dl.get("batch_size", 500),
+        "csv_path":     dl["csv_path"],
+        "ontology_path": dl.get("ontology_path", "ontology.json"),
+        # [audio]
+        "sample_rate":  audio_cfg.get("sample_rate", 48000),
+        "channels":     audio_cfg.get("channels", 1),
+        "min_duration": audio_cfg.get("min_duration", 8),
+        "max_duration": audio_cfg.get("max_duration", 10),
+        # [browser]
+        "use_cookies":  browser_cfg.get("use_cookies", False),
+        "browser_name": browser_cfg.get("browser", "firefox"),
+        "sleep_interval": browser_cfg.get("sleep_interval", [1, 3]),
+    }
+
+    if not cfg["targets"]:
         logging.error("No target categories provided. Stopping.")
         return
 
-    target_os = HOST_OS.lower()
-    if target_os not in ["windows", "linux"]:
-        logging.error("Invalid HOST_OS. Choose either 'windows' or 'linux'.")
+    if cfg["host"] not in ["windows", "linux"]:
+        logging.error("Invalid host in config. Choose either 'windows' or 'linux'.")
         return
-        
-    logging.info(f"Configured Target OS: {target_os}")
 
-    output_dir = Path(OUTPUT_DIR)
+    logging.info(f"Configured Target OS: {cfg['host']}")
+
+    output_dir = Path(cfg["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
-    metadata_path = Path("metadata.csv")
-    
+    audio_dir = output_dir / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = output_dir / cfg["metadata"]
+
     logging.info(f"Saving output to: {output_dir.absolute()}")
     logging.info("Loading ontology map...")
-    
-    target_map, id_to_item = get_target_mappings(ONTOLOGY_PATH, TARGET_CATEGORIES)
-    avoid_map, _ = get_target_mappings(ONTOLOGY_PATH, AVOID_CATEGORIES)
-    
+
+    target_map, id_to_item = get_target_mappings(cfg["ontology_path"], cfg["targets"])
+    avoid_map, _ = get_target_mappings(cfg["ontology_path"], cfg["avoid"])
+
     if not target_map:
         logging.warning("Done. (Category config is empty or mismatched)")
         return
-        
+
     resolved_count_sum = sum(len(v) for v in target_map.values())
     logging.info(f"Found {len(target_map)} target root categories mapping to {resolved_count_sum} specific tags.")
     if avoid_map:
         logging.info(f"Found {len(avoid_map)} blacklisted root categories, tracking {sum(len(v) for v in avoid_map.values())} specific tags to dodge.")
-    
-    logging.info("Parsing Unbalanced Train Dataset...")
-    segments_to_process = parse_csv_for_targets(CSV_PATH, target_map, avoid_map, MAX_SAMPLES, MIN_DURATION, metadata_path)
+
+    logging.info(f"Parsing dataset: {cfg['csv_path']} ...")
+    segments_to_process = parse_csv_for_targets(
+        cfg["csv_path"], target_map, avoid_map,
+        cfg["max_samples"], cfg["min_duration"], metadata_path
+    )
     already_done = len(get_existing_downloads(metadata_path))
-    
+
     logging.info(f"Ready to process. Filtered candidates available: {len(segments_to_process)}")
-    
+
     downloaded_count = 0
+    sleep_min, sleep_max = cfg["sleep_interval"][0], cfg["sleep_interval"][1]
 
     for segment in segments_to_process:
         total_so_far = already_done + downloaded_count
-        if total_so_far >= MAX_SAMPLES:
-            logging.info(f"--> Reached MAX_SAMPLES [{MAX_SAMPLES}]. Done.")
+        if total_so_far >= cfg["max_samples"]:
+            logging.info(f"--> Reached MAX_SAMPLES [{cfg['max_samples']}]. Done.")
             break
-        if downloaded_count >= BATCH_SIZE:
-            logging.info(f"--> Reached batch limit [{BATCH_SIZE}]. Taking a break (re-run to grab more).")
+        if downloaded_count >= cfg["batch_size"]:
+            logging.info(f"--> Reached batch limit [{cfg['batch_size']}]. Taking a break (re-run to grab more).")
             break
-            
-        is_success = download_audio(segment, output_dir, id_to_item, metadata_path, target_os)
-        
+
+        is_success = download_audio(segment, audio_dir, id_to_item, metadata_path, cfg)
+
         if is_success:
             downloaded_count += 1
-            delay = random.uniform(SLEEP_INTERVAL[0], SLEEP_INTERVAL[1])
-            logging.info(f"    --> Download complete ({already_done + downloaded_count}/{MAX_SAMPLES}). Cooldown: {delay:.2f}s")
+            delay = random.uniform(sleep_min, sleep_max)
+            logging.info(f"    --> Download complete ({already_done + downloaded_count}/{cfg['max_samples']}). Cooldown: {delay:.2f}s")
             time.sleep(delay)
 
     logging.info(f"All done! Successfully grabbed {downloaded_count} new samples this session.")
